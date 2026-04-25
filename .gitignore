@@ -1,0 +1,4 @@
+# Local Go workspace (developer-specific replace directives).
+# See README for setup.
+go.work
+go.work.sum
