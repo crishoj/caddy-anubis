@@ -74,30 +74,32 @@ jobs:
           set -euo pipefail
           go install golang.org/x/vuln/cmd/govulncheck@latest
 
-          # govulncheck exits non-zero when vulns are reachable, so we
-          # capture its JSON output and inspect it ourselves.
-          govulncheck -format json ./... > vuln.json || true
+          # govulncheck exits non-zero when reachable vulns are found.
+          out=$(govulncheck ./... 2>&1) || true
 
-          # Extract unique vuln IDs from the NDJSON stream.
-          found=$(jq -r 'select(.osv) | .osv.id' vuln.json | sort -u)
+          # Extract unique IDs from "Vulnerability #N: GO-..." headers.
+          # govulncheck emits those only for reachable findings; pure
+          # database hits (a vuln exists in a dep we don't call into)
+          # don't get a header.
+          found=$(printf '%s\n' "$out" | sed -nE 's/^Vulnerability #[0-9]+: (GO-[0-9]+-[0-9]+).*/\1/p' | sort -u)
 
           if [ -z "$found" ]; then
-            echo "No vulnerabilities found."
+            echo "No reachable vulnerabilities found."
             exit 0
           fi
 
-          echo "Found vulnerabilities:"
-          echo "$found"
+          echo "govulncheck output:"
+          printf '%s\n' "$out"
           echo
 
           # Strip comments + blank lines from the allowlist before diff.
           allowlist=$(mktemp)
           grep -vE '^\s*(#|$)' .github/govulncheck-allowlist.txt > "$allowlist"
 
-          unknown=$(echo "$found" | grep -vxFf "$allowlist") || true
+          unknown=$(printf '%s\n' "$found" | grep -vxFf "$allowlist") || true
           if [ -n "$unknown" ]; then
-            echo "::error::Vulnerabilities not in .github/govulncheck-allowlist.txt:"
-            echo "$unknown"
+            echo "::error::Reachable vulnerabilities not in .github/govulncheck-allowlist.txt:"
+            printf '%s\n' "$unknown"
             echo
             echo "Either upgrade the affected dependency, or — if it's"
             echo "transitive code we don't actually call — add the ID"
@@ -105,4 +107,4 @@ jobs:
             exit 1
           fi
 
-          echo "All vulnerabilities matched allowlist; passing."
+          echo "All reachable vulnerabilities matched allowlist; passing."
