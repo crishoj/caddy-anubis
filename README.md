@@ -1,5 +1,7 @@
 # caddy-anubis
 
+[![CI](https://github.com/crishoj/caddy-anubis/actions/workflows/ci.yml/badge.svg)](https://github.com/crishoj/caddy-anubis/actions/workflows/ci.yml)
+
 A native Caddy module for [Anubis](https://github.com/TecharoHQ/anubis).
 
 > **Status: exploratory.** This is a research spike — usable for single-site
