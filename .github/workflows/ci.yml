@@ -64,15 +64,45 @@ jobs:
           path: caddy-anubis
       - uses: ./caddy-anubis/.github/actions/setup
 
-      # Non-blocking: govulncheck flags vulns reachable in our dep tree
-      # via symbol analysis, including transitive ones we don't directly
-      # call (e.g. smallstep/certificates SCEP issues reachable through
-      # caddy/v2/modules/standard's acme_server). Those will be fixed
-      # only when Caddy bumps its own deps. The check is still useful
-      # for surfacing anything we'd actually invoke, so we run it but
-      # don't fail the build.
+      # Vulns in transitive code we can't fix from here (e.g. things
+      # reachable through caddy/v2/modules/standard's acme_server) are
+      # listed in .github/govulncheck-allowlist.txt. Anything NOT on
+      # that list fails the build, so a new vuln forces an explicit
+      # fix-or-allowlist decision.
       - name: govulncheck
-        continue-on-error: true
         run: |
+          set -euo pipefail
           go install golang.org/x/vuln/cmd/govulncheck@latest
-          govulncheck ./...
+
+          # govulncheck exits non-zero when vulns are reachable, so we
+          # capture its JSON output and inspect it ourselves.
+          govulncheck -format json ./... > vuln.json || true
+
+          # Extract unique vuln IDs from the NDJSON stream.
+          found=$(jq -r 'select(.osv) | .osv.id' vuln.json | sort -u)
+
+          if [ -z "$found" ]; then
+            echo "No vulnerabilities found."
+            exit 0
+          fi
+
+          echo "Found vulnerabilities:"
+          echo "$found"
+          echo
+
+          # Strip comments + blank lines from the allowlist before diff.
+          allowlist=$(mktemp)
+          grep -vE '^\s*(#|$)' .github/govulncheck-allowlist.txt > "$allowlist"
+
+          unknown=$(echo "$found" | grep -vxFf "$allowlist") || true
+          if [ -n "$unknown" ]; then
+            echo "::error::Vulnerabilities not in .github/govulncheck-allowlist.txt:"
+            echo "$unknown"
+            echo
+            echo "Either upgrade the affected dependency, or — if it's"
+            echo "transitive code we don't actually call — add the ID"
+            echo "to the allowlist with a rationale in the commit msg."
+            exit 1
+          fi
+
+          echo "All vulnerabilities matched allowlist; passing."
