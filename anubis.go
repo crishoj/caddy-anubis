@@ -24,6 +24,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/exp/zapslog"
 
+	"github.com/TecharoHQ/anubis"
 	libanubis "github.com/TecharoHQ/anubis/lib"
 
 	// Memory store backend; required for the default policy. Other backends
@@ -85,6 +86,10 @@ func (m *Middleware) Provision(ctx caddy.Context) error {
 	server, err := libanubis.New(libanubis.Options{
 		Next:   nexterr.Forwarder{},
 		Policy: policy,
+		// libanubis bakes CookieExpiration into both the cookie's Expires
+		// attribute and the JWT's exp claim. Leaving it at the zero value
+		// produces expired-on-arrival cookies and an infinite challenge loop.
+		CookieExpiration: anubis.CookieDefaultExpirationTime,
 		Logger: slog.New(zapslog.NewHandler(
 			m.logger.Core(),
 			zapslog.WithName("anubis"),

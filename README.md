@@ -16,32 +16,14 @@ upstream commits prebuilt assets at release time, you need a local clone
 of Anubis with `make assets` run, plus a local `go.work` file pointing
 the workspace at it (gitignored — developer-specific).
 
-One-time setup (paths are arbitrary; pick whatever works for you):
-
-1. Clone Anubis somewhere and build its assets:
-
-   ```sh
-   git clone https://github.com/TecharoHQ/anubis
-   cd anubis && make assets   # needs npm; on macOS, also `brew install bash`
-   ```
-
-2. From this repo, create a `go.work` pointing at that clone (gitignored):
-
-   ```sh
-   cat > go.work <<EOF
-   go 1.25
-   use .
-   replace github.com/TecharoHQ/anubis => $(realpath ../anubis)
-   EOF
-   ```
-
-   Adjust the path to wherever you cloned Anubis.
-
-Then:
+One-time setup (requires Go 1.25+, npm, Bash 4+):
 
 ```sh
-go run ./cmd/caddy run --config Caddyfile
+make setup     # clones Anubis to ../anubis, builds its assets, writes go.work
+make run       # starts Caddy on :8080
 ```
+
+Override the clone location with `make setup ANUBIS_DIR=path/of/your/choice`.
 
 Then in a browser, hit `http://localhost:8080`. Expected:
 1. First request: Anubis serves a proof-of-work challenge page.
