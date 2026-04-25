@@ -6,45 +6,16 @@ on:
   pull_request:
 
 jobs:
-  test:
+  lint:
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: caddy-anubis
     steps:
-      # Lay both repos out as siblings under $GITHUB_WORKSPACE so the
-      # default ANUBIS_DIR=../anubis in our Makefile works unchanged.
-      - name: Checkout caddy-anubis
-        uses: actions/checkout@v6
+      - uses: actions/checkout@v6
         with:
           path: caddy-anubis
-
-      - name: Checkout TecharoHQ/anubis
-        uses: actions/checkout@v6
-        with:
-          repository: TecharoHQ/anubis
-          path: anubis
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: '1.25'
-          cache-dependency-path: caddy-anubis/go.sum
-
-      - name: Set up Node
-        uses: actions/setup-node@v6
-        with:
-          node-version: '22'
-          cache: 'npm'
-          cache-dependency-path: anubis/package-lock.json
-
-      # `make setup` is a no-op for the clone step (anubis is already
-      # checked out), then runs the asset build and writes go.work.
-      # libanubis embeds generated JS/CSS that aren't in its published
-      # tarballs (TecharoHQ/anubis#1587), so the asset build is required
-      # before any `go build`/`go test`.
-      - name: Setup (build libanubis assets, write go.work)
-        run: make setup
+      - uses: ./caddy-anubis/.github/actions/setup
 
       - name: gofmt
         run: |
@@ -68,8 +39,30 @@ jobs:
           go mod tidy
           git diff --exit-code go.mod go.sum
 
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: caddy-anubis
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: caddy-anubis
+      - uses: ./caddy-anubis/.github/actions/setup
+
       - name: go test -race
         run: go test -race ./...
+
+  security:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: caddy-anubis
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: caddy-anubis
+      - uses: ./caddy-anubis/.github/actions/setup
 
       # Non-blocking: govulncheck flags vulns reachable in our dep tree
       # via symbol analysis, including transitive ones we don't directly

@@ -1,0 +1,39 @@
+name: Setup
+description: >-
+  Lays out caddy-anubis and TecharoHQ/anubis as siblings under
+  $GITHUB_WORKSPACE, installs Go and Node, and runs `make setup` to
+  build libanubis's embedded assets and write a go.work pointing at
+  the sibling clone. Caller is responsible for the initial checkout
+  of caddy-anubis (so this action's path is resolvable).
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout TecharoHQ/anubis
+      uses: actions/checkout@v6
+      with:
+        repository: TecharoHQ/anubis
+        path: anubis
+
+    - name: Set up Go
+      uses: actions/setup-go@v6
+      with:
+        go-version: '1.25'
+        cache-dependency-path: caddy-anubis/go.sum
+
+    - name: Set up Node
+      uses: actions/setup-node@v6
+      with:
+        node-version: '22'
+        cache: 'npm'
+        cache-dependency-path: anubis/package-lock.json
+
+    # libanubis embeds generated JS/CSS that aren't in its published
+    # tarballs (TecharoHQ/anubis#1587), so the asset build is required
+    # before any `go build`/`go test`. `make setup` is a no-op for the
+    # clone step (anubis is already checked out), then runs the asset
+    # build and writes go.work.
+    - name: Build libanubis assets, write go.work
+      shell: bash
+      working-directory: caddy-anubis
+      run: make setup
