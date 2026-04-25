@@ -2,3 +2,6 @@
 # See README for setup.
 go.work
 go.work.sum
+
+# Drafts/notes not meant for the repo.
+notes/

@@ -5,17 +5,23 @@
 //
 //	xcaddy build --with github.com/crishoj/caddy-anubis
 //
-// This package is currently a thin integration spike: a single middleware
-// directive with one libanubis.Server per block. The full module (shared
-// caddy.App for cross-site signing key + store, per-route policy overrides)
-// is not yet implemented.
+// This package is currently a single-block integration spike. The full
+// module (shared caddy.App for cross-site signing key + store, per-route
+// policy overrides) is not yet implemented; see README for known gaps.
 package caddyanubis
 
 import (
+	"crypto/ed25519"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -57,6 +63,34 @@ type Middleware struct {
 	// Anubis's built-in default policy is used (memory store, default rules).
 	PolicyFile string `json:"policy_file,omitempty"`
 
+	// ED25519PrivateKeyHex is a hex-encoded 32-byte ED25519 seed used to sign
+	// challenge JWTs. When empty (and ED25519PrivateKeyFile is also empty),
+	// libanubis generates a fresh key per process start, which invalidates
+	// every previously issued cookie on each Caddy reload. For deployments
+	// with returning visitors, set this to a stable value.
+	//
+	// Generate with: `openssl rand -hex 32`.
+	ED25519PrivateKeyHex string `json:"ed25519_private_key_hex,omitempty"`
+
+	// ED25519PrivateKeyFile is the path to a file containing a hex-encoded
+	// 32-byte ED25519 seed. Mutually exclusive with ED25519PrivateKeyHex;
+	// useful for secrets stored in Kubernetes/Vault/etc.
+	ED25519PrivateKeyFile string `json:"ed25519_private_key_file,omitempty"`
+
+	// RedirectDomains is the allowlist of domains Anubis is permitted to
+	// redirect to after a successful challenge. Globs (`*`) supported. When
+	// empty, any domain is allowed — open-redirect risk via the `?redir=`
+	// parameter on PoW pass.
+	RedirectDomains []string `json:"redirect_domains,omitempty"`
+
+	// ServeRobotsTXT, when true, makes Anubis serve a built-in robots.txt
+	// disallowing all crawlers at /robots.txt and /.well-known/robots.txt.
+	ServeRobotsTXT bool `json:"serve_robots_txt,omitempty"`
+
+	// CookieExpiration overrides the default cookie + JWT lifetime
+	// (anubis.CookieDefaultExpirationTime, 7 days).
+	CookieExpiration caddy.Duration `json:"cookie_expiration,omitempty"`
+
 	server *libanubis.Server
 	logger *zap.Logger
 }
@@ -67,6 +101,29 @@ func (Middleware) CaddyModule() caddy.ModuleInfo {
 		ID:  "http.handlers.anubis",
 		New: func() caddy.Module { return new(Middleware) },
 	}
+}
+
+// Validate checks the static configuration before Provision constructs the
+// Anubis server. Returning an error here surfaces problems at config-load
+// time rather than as 500s on the first request.
+func (m *Middleware) Validate() error {
+	if m.ED25519PrivateKeyHex != "" && m.ED25519PrivateKeyFile != "" {
+		return errors.New("ed25519_private_key_hex and ed25519_private_key_file are mutually exclusive")
+	}
+	if m.ED25519PrivateKeyHex != "" {
+		if _, err := decodeED25519Hex(m.ED25519PrivateKeyHex); err != nil {
+			return fmt.Errorf("ed25519_private_key_hex: %w", err)
+		}
+	}
+	if m.PolicyFile != "" {
+		if _, err := os.Stat(m.PolicyFile); err != nil {
+			return fmt.Errorf("policy_file: %w", err)
+		}
+	}
+	if m.Difficulty < 0 || m.Difficulty > 32 {
+		return fmt.Errorf("difficulty must be in [0, 32], got %d", m.Difficulty)
+	}
+	return nil
 }
 
 // Provision loads the policy and constructs the Anubis server.
@@ -83,18 +140,40 @@ func (m *Middleware) Provision(ctx caddy.Context) error {
 		return fmt.Errorf("anubis: load policy: %w", err)
 	}
 
-	server, err := libanubis.New(libanubis.Options{
+	opts := libanubis.Options{
 		Next:   nexterr.Forwarder{},
 		Policy: policy,
 		// libanubis bakes CookieExpiration into both the cookie's Expires
 		// attribute and the JWT's exp claim. Leaving it at the zero value
 		// produces expired-on-arrival cookies and an infinite challenge loop.
 		CookieExpiration: anubis.CookieDefaultExpirationTime,
+		RedirectDomains:  m.RedirectDomains,
+		ServeRobotsTXT:   m.ServeRobotsTXT,
 		Logger: slog.New(zapslog.NewHandler(
 			m.logger.Core(),
 			zapslog.WithName("anubis"),
 		)),
-	})
+	}
+	if d := time.Duration(m.CookieExpiration); d > 0 {
+		opts.CookieExpiration = d
+	}
+	if m.ED25519PrivateKeyHex != "" || m.ED25519PrivateKeyFile != "" {
+		hexStr := m.ED25519PrivateKeyHex
+		if hexStr == "" {
+			b, err := os.ReadFile(m.ED25519PrivateKeyFile)
+			if err != nil {
+				return fmt.Errorf("anubis: reading ed25519_private_key_file: %w", err)
+			}
+			hexStr = string(b)
+		}
+		key, err := decodeED25519Hex(hexStr)
+		if err != nil {
+			return fmt.Errorf("anubis: ed25519 key: %w", err)
+		}
+		opts.ED25519PrivateKey = key
+	}
+
+	server, err := libanubis.New(opts)
 	if err != nil {
 		return fmt.Errorf("anubis: new server: %w", err)
 	}
@@ -137,11 +216,32 @@ func clientIP(r *http.Request) string {
 	return r.RemoteAddr
 }
 
+// decodeED25519Hex parses a hex-encoded 32-byte ED25519 seed into a
+// PrivateKey. Whitespace around the hex string is trimmed (so reading from
+// a file with a trailing newline works).
+func decodeED25519Hex(s string) (ed25519.PrivateKey, error) {
+	s = strings.TrimSpace(s)
+	wantLen := hex.EncodedLen(ed25519.SeedSize)
+	if len(s) != wantLen {
+		return nil, fmt.Errorf("expected %d hex chars (32-byte seed), got %d", wantLen, len(s))
+	}
+	seed, err := hex.DecodeString(s)
+	if err != nil {
+		return nil, fmt.Errorf("invalid hex: %w", err)
+	}
+	return ed25519.NewKeyFromSeed(seed), nil
+}
+
 // UnmarshalCaddyfile parses tokens of the form:
 //
 //	anubis [<policy_file>] {
-//	    policy_file <path>
-//	    difficulty  <int>
+//	    policy_file              <path>
+//	    difficulty               <int>
+//	    ed25519_private_key_hex  <hex>      # 64 hex chars (32-byte seed)
+//	    ed25519_private_key_file <path>     # mutually exclusive with the hex form
+//	    redirect_domains         <d>...     # globs allowed
+//	    serve_robots_txt
+//	    cookie_expiration        <duration> # default 7d
 //	}
 func (m *Middleware) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	d.Next()
@@ -159,11 +259,40 @@ func (m *Middleware) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			if !d.NextArg() {
 				return d.ArgErr()
 			}
-			var n int
-			if _, err := fmt.Sscanf(d.Val(), "%d", &n); err != nil {
+			n, err := strconv.Atoi(d.Val())
+			if err != nil {
 				return d.Errf("invalid difficulty %q: %v", d.Val(), err)
 			}
 			m.Difficulty = n
+		case "ed25519_private_key_hex":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			m.ED25519PrivateKeyHex = d.Val()
+		case "ed25519_private_key_file":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			m.ED25519PrivateKeyFile = d.Val()
+		case "redirect_domains":
+			m.RedirectDomains = d.RemainingArgs()
+			if len(m.RedirectDomains) == 0 {
+				return d.ArgErr()
+			}
+		case "serve_robots_txt":
+			if d.NextArg() {
+				return d.Errf("serve_robots_txt is a flag, takes no arguments")
+			}
+			m.ServeRobotsTXT = true
+		case "cookie_expiration":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			dur, err := caddy.ParseDuration(d.Val())
+			if err != nil {
+				return d.Errf("invalid cookie_expiration %q: %v", d.Val(), err)
+			}
+			m.CookieExpiration = caddy.Duration(dur)
 		default:
 			return d.Errf("unknown anubis subdirective %q", d.Val())
 		}
@@ -179,6 +308,7 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 
 var (
 	_ caddy.Provisioner           = (*Middleware)(nil)
+	_ caddy.Validator             = (*Middleware)(nil)
 	_ caddyhttp.MiddlewareHandler = (*Middleware)(nil)
 	_ caddyfile.Unmarshaler       = (*Middleware)(nil)
 )

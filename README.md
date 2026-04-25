@@ -33,6 +33,41 @@ Then in a browser, hit `http://localhost:8080`. Expected:
 Anubis's own metrics are exposed alongside Caddy's at `/metrics` if you
 add an admin/metrics endpoint.
 
+## Caddyfile options
+
+```caddyfile
+anubis [<policy_file>] {
+    policy_file              <path>     # bot policy YAML; built-in default if omitted
+    difficulty               <int>      # PoW leading-zero bits; default 4
+    ed25519_private_key_hex  <hex>      # 64 hex chars (32-byte seed); see below
+    ed25519_private_key_file <path>     # mutually exclusive with the hex form
+    redirect_domains         <d>...     # allowlist for ?redir= on PoW pass; globs OK
+    serve_robots_txt                    # serve a built-in disallow-all robots.txt
+    cookie_expiration        <duration> # cookie + JWT lifetime; default 168h (7d)
+}
+```
+
+**ED25519 key persistence.** Without `ed25519_private_key_hex` or
+`ed25519_private_key_file`, libanubis generates a fresh signing key on every
+process start, invalidating all previously issued cookies on each Caddy
+reload. For deployments with returning visitors, set a stable key:
+
+```sh
+openssl rand -hex 32 > /etc/anubis/key.hex
+```
+
+Then in your Caddyfile:
+
+```caddyfile
+anubis {
+    ed25519_private_key_file /etc/anubis/key.hex
+}
+```
+
+**`redirect_domains`** is a security boundary. The `?redir=` parameter on
+the PoW pass URL is otherwise open-redirect to any host. Set this to your
+own domain(s) in production.
+
 ## Pieces
 
 - `anubis.go` — the `http.handlers.anubis` Caddy module.
@@ -65,7 +100,6 @@ and respects the slog empty-group spec edge case.
   different prefixes will step on its own toes; the eventual `caddy.App`
   pattern needs to enforce a single global instance.
 - No `Cleanup` — store backends (when configured) leak on Caddy reload.
-- No `Validate` — bad config surfaces only at request time.
 - No replacer support: `policy_file` and friends don't expand `{env.X}` etc.
 - No metrics integration with Caddy's Prometheus surface (Anubis registers
   to the global registry, so they show up alongside Caddy's by default).
