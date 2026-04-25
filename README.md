@@ -1,12 +1,22 @@
 # caddy-anubis
 
-A native Caddy module for [Anubis](https://github.com/TecharoHQ/anubis), exploring
-what a "proper" integration looks like beyond the existing prototypes.
+A native Caddy module for [Anubis](https://github.com/TecharoHQ/anubis).
 
-This is a work-in-progress integration spike. One middleware directive,
-one `libanubis.Server` per block, hardcoded options. The full module
-(shared `caddy.App` for cross-site signing keys + store backends, per-route
-policy overrides, metrics, hot-reload) is not yet implemented.
+> **Status: exploratory.** This is a research spike — usable for single-site
+> deployments today, but not a stable release and not recommended for
+> production without reading the [Known gaps](#known-gaps) section. An
+> official native plugin is under discussion in
+> [TecharoHQ/anubis#16](https://github.com/TecharoHQ/anubis/issues/16) and
+> [PR #1577](https://github.com/TecharoHQ/anubis/pull/1577); if/when that
+> lands, this repo is mostly archeology — but the design choices and
+> upstream-issue findings here may still be useful reference material.
+
+This is a single-block integration spike: one middleware directive, one
+`libanubis.Server` per block. The full module (shared `caddy.App` for
+cross-site signing keys + store backends, per-route policy overrides,
+metrics, hot-reload) is not yet implemented and is gated on upstream
+[issue #1588](https://github.com/TecharoHQ/anubis/issues/1588) (libanubis
+package globals).
 
 ## Run the spike
 
@@ -86,20 +96,45 @@ and respects the slog empty-group spec edge case.
 
 ## Known gaps
 
+Items marked _upstream_ depend on changes in libanubis itself.
+
 - **libanubis is unbuildable as a Go module dependency.** Embedded assets
   (`lib/challenge/preact/static/app.js`, `web/static/*`, `xess.min.css`)
   are gitignored and missing from tagged release tarballs. Workaround:
-  local clone + `go.work`. Upstream fix would be to commit prebuilt
-  assets at release time.
+  local clone + `go.work` (see setup above). _upstream:
+  [#1587](https://github.com/TecharoHQ/anubis/issues/1587)._
 - **libanubis policy parsing uses its own `slog` logger** writing to
   stderr, bypassing whatever logger we pass via `Options.Logger`. Caddy's
   log pipeline doesn't see policy-parse warnings (e.g. Thoth warnings).
   Server runtime logs do flow through correctly via our zapslog adapter.
-- libanubis mutates package-level globals (`anubis.BasePrefix`,
+  _upstream: [#1589](https://github.com/TecharoHQ/anubis/issues/1589)._
+- **libanubis mutates package-level globals** (`anubis.BasePrefix`,
   `anubis.PublicUrl`) on every `lib.New()` call. Multi-site usage with
-  different prefixes will step on its own toes; the eventual `caddy.App`
-  pattern needs to enforce a single global instance.
+  different prefixes silently corrupts cookies; the eventual `caddy.App`
+  pattern needs this fixed first. _upstream:
+  [#1588](https://github.com/TecharoHQ/anubis/issues/1588)._
 - No `Cleanup` — store backends (when configured) leak on Caddy reload.
 - No replacer support: `policy_file` and friends don't expand `{env.X}` etc.
 - No metrics integration with Caddy's Prometheus surface (Anubis registers
   to the global registry, so they show up alongside Caddy's by default).
+
+## Upstream contributions
+
+While building this, six findings were raised on
+[TecharoHQ/anubis](https://github.com/TecharoHQ/anubis):
+
+- PR [#1585](https://github.com/TecharoHQ/anubis/pull/1585) — Makefile
+  `$(CURDIR)` fix so `make -C` works.
+- PR [#1586](https://github.com/TecharoHQ/anubis/pull/1586) —
+  `Options.CookieExpiration` zero-value default
+  (`anubis.CookieDefaultExpirationTime`), avoiding expired-on-arrival
+  cookies and the resulting infinite challenge loop for library consumers.
+- Issue [#1587](https://github.com/TecharoHQ/anubis/issues/1587) —
+  embedded assets gitignored, breaking go-module consumption.
+- Issue [#1588](https://github.com/TecharoHQ/anubis/issues/1588) —
+  `anubis.BasePrefix`/`anubis.PublicUrl` are package globals.
+- Issue [#1589](https://github.com/TecharoHQ/anubis/issues/1589) —
+  `policy.ParseConfig` ignores `Options.Logger`.
+- Comment on [PR #1577](https://github.com/TecharoHQ/anubis/pull/1577) —
+  Caddy directive ordering (`Before "reverse_proxy"` vs.
+  `After "templates"`).
